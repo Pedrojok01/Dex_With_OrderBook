@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.6;
 pragma experimental ABIEncoderV2;
 
 import "./wallet.sol";
@@ -29,7 +29,8 @@ contract Dex is Wallet {
     }
 
     uint public nextOrderId = 1;
-    mapping(bytes32 => mapping(uint => Order[])) public orderBook; //Map by ticker and side
+    mapping(bytes32 => mapping(uint => Order[])) public orderBook; //Map orders by ticker and side == get orderbook per side & token
+    mapping(address => Order[]) traderOrders; //Map orders by trader == get open order per address
     
 
 /* *** Events ***
@@ -38,8 +39,7 @@ contract Dex is Wallet {
     event limitOrderCreated(Side side, bytes32 _ticker, uint _amount, uint _price);
     event marketOrderFilled(Side side, bytes32 _ticker, uint _amount);
     event filledOrderRemoved(uint _Id, Side side, bytes32 _ticker);
-    event ethSwapped(bytes32 _ticker, address _to, uint _amount, uint price);
-    event tokenSwapped(bytes32 _ticker, address _to, uint _amount, uint price);
+    event swapDone(Side side, bytes32 _ticker, address _to, uint _amount, uint price);
 
 
 /* *** Functions ***
@@ -59,28 +59,35 @@ contract Dex is Wallet {
         }
     }
 
-
-    function swapEth(bytes32 _ticker, address _to, uint _amount, uint price) internal {
-        require(balances[msg.sender]["ETH"] >= _amount.mul(price), "Not enough ETH");
-
-        balances[msg.sender]["ETH"] = balances[msg.sender]["ETH"].sub(_amount.mul(price));
-        balances[_to][_ticker] = balances[_to][_ticker].sub(_amount);
-        balances[msg.sender][_ticker] = balances[msg.sender][_ticker].add(_amount);
-        balances[_to]["ETH"] = balances[_to]["ETH"].add(_amount.mul(price));
-
-        emit ethSwapped(_ticker, _to, _amount, price);
+    function getOpenOrders(address _trader) view public returns(Order[] memory) {
+        return traderOrders[_trader];
     }
 
 
-    function swapToken(bytes32 _ticker, address _to, uint _amount, uint price) internal {
-        require(balances[msg.sender][_ticker] >= _amount, "Not enough tokens");
+    function getTokenList() public view returns(uint256){
+        return tokenList.length;
+    }
 
-        balances[msg.sender][_ticker] = balances[msg.sender][_ticker].sub(_amount);
-        balances[_to]["ETH"] = balances[_to]["ETH"].sub(_amount.mul(price));
-        balances[msg.sender]["ETH"] = balances[msg.sender]["ETH"].add(_amount.mul(price));
-        balances[_to][_ticker] = balances[_to][_ticker].add(_amount);
 
-        emit tokenSwapped(_ticker, _to, _amount, price);
+    function swapToken(Side side, bytes32 _ticker, address _to, uint _amount, uint price) internal {
+        uint orderBookSide = getOrderBookSide(side);
+
+        if(orderBookSide == 1){
+            require(balances[msg.sender]["ETH"] >= _amount.mul(price), "Not enough ETH");
+            balances[msg.sender]["ETH"] = balances[msg.sender]["ETH"].sub(_amount.mul(price));
+            balances[_to][_ticker] = balances[_to][_ticker].sub(_amount);
+            balances[msg.sender][_ticker] = balances[msg.sender][_ticker].add(_amount);
+            balances[_to]["ETH"] = balances[_to]["ETH"].add(_amount.mul(price));
+        }
+        else{
+            require(balances[msg.sender][_ticker] >= _amount, "Not enough tokens");
+            balances[msg.sender][_ticker] = balances[msg.sender][_ticker].sub(_amount);
+            balances[_to]["ETH"] = balances[_to]["ETH"].sub(_amount.mul(price));
+            balances[msg.sender]["ETH"] = balances[msg.sender]["ETH"].add(_amount.mul(price));
+            balances[_to][_ticker] = balances[_to][_ticker].add(_amount);
+        }
+
+        emit swapDone(side, _ticker, _to, _amount, price);
     }
 
 
@@ -130,8 +137,7 @@ contract Dex is Wallet {
 
 
     function createMarketOrder(Side side, bytes32 _ticker, uint _amount) public {
-        uint orderBookSide = getOrderBookSide(side);
-        Order[] storage orders = orderBook[_ticker][orderBookSide];
+        Order[] storage orders = orderBook[_ticker][getOrderBookSide(side)];
 
         //Loop through order book til order filled or order book emptied
         uint totalFilled = 0;
@@ -140,60 +146,36 @@ contract Dex is Wallet {
         for (uint i = 0; orders.length != 0; i) {
             totalFilled = totalFilled.add(orders[i].amount);
 
-            //Single limit order needed:
-            if(totalFilled == _amount){
-                if(orderBookSide == 1){
-                    swapEth(_ticker, orders[i].trader, leftToFill, orders[i].price);
-                    orders[i].filled = orders[i].amount;
-                    removeFilledOrder(orders[i].orderId, side, _ticker);
-                    break;
-                }
-                else{
-                    swapToken(_ticker, orders[i].trader, leftToFill, orders[i].price);
-                    orders[i].filled = orders[i].amount;
-                    removeFilledOrder(orders[i].orderId, side, _ticker);
-                    break;
-                }
+            //Limit order == market order:
+            if(totalFilled == _amount){ 
+                swapToken(side, _ticker, orders[i].trader, leftToFill, orders[i].price);
+                orders[i].filled = orders[i].amount;
+                removeFilledOrder(orders[i].orderId, side, _ticker);
+                break;
             }
-            
+            //Market order < Limit order
             else if(totalFilled > _amount){   
-                if(orderBookSide == 1){
-                    swapEth(_ticker, orders[i].trader, leftToFill, orders[i].price);
-                    orders[i].filled = orders[i].filled.add(_amount);
-                    break;
-                }
-                else{
-                    swapToken(_ticker, orders[i].trader, leftToFill, orders[i].price);
-                    orders[i].filled = orders[i].filled.add(_amount);
-                    break;
-                }
+                swapToken(side, _ticker, orders[i].trader, leftToFill, orders[i].price);
+                orders[i].filled = orders[i].filled.add(_amount);
+                break;
             }
 
-            //More than 1 limit order needed:
+            //Market order > limit order (multiple limit order needed):
             else if (totalFilled < _amount){
                 leftToFill -= orders[i].amount;
-
-                //For market BUY
-                if(orderBookSide == 1){
-                    swapEth(_ticker, orders[i].trader, orders[i].amount, orders[i].price);
-                    orders[i].filled = orders[i].amount;
-                    removeFilledOrder(orders[i].orderId, side, _ticker);
-                }
-                //For market SELL
-                else {
-                    swapToken(_ticker, orders[i].trader, orders[i].amount, orders[i].price);
-                    orders[i].filled = orders[i].amount;
-                    removeFilledOrder(orders[i].orderId, side, _ticker);
-                }
+                swapToken(side, _ticker, orders[i].trader, orders[i].amount, orders[i].price);
+                orders[i].filled = orders[i].amount;
+                removeFilledOrder(orders[i].orderId, side, _ticker);
             }
         }
+        
         emit marketOrderFilled(side, _ticker, _amount);
     }
 
 
-    function removeFilledOrder(uint _Id, Side side, bytes32 _ticker) internal {
+    function removeFilledOrder(uint _Id, Side side, bytes32 _ticker) private {
         Order[] storage orders = orderBook[_ticker][getOrderBookSide(side)];
-        require(orders[0].amount == orders[0].filled, "the order isn't fully filled");
+        require(orders[0].amount == orders[0].filled, "The order isn't fully filled.");
 
         for (uint i = 0; i < orders.length-1; i++){
             orders[i] = orders[i+1];

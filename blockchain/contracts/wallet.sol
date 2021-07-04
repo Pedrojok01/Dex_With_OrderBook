@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.6;
 
 import "../node_modules/@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../node_modules/@openzeppelin/contracts/access/Ownable.sol";
@@ -72,8 +72,11 @@ contract Wallet is Ownable {
 
     function withdrawEth(uint amount) external {
         require(balances[msg.sender][bytes32("ETH")] >= amount, "Balance insufficient");
+        uint oldBal = balances[msg.sender][bytes32("ETH")];
         balances[msg.sender][bytes32("ETH")] = balances[msg.sender][bytes32("ETH")].sub(amount);
-        msg.sender.call{value:amount}("");
+        assert(oldBal == balances[msg.sender][bytes32("ETH")] + (amount));
+        (bool success, ) = msg.sender.call{value:amount}("");
+        require(success, "Transfer failed.");
         emit EthWithdrawed(amount);
     }
 }

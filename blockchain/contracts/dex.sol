@@ -4,9 +4,7 @@ pragma experimental ABIEncoderV2;
 
 import "./wallet.sol";
 
-
 contract Dex is Wallet {
-
     using SafeMath for uint256;
 
 
@@ -30,13 +28,14 @@ contract Dex is Wallet {
 
     uint public nextOrderId = 1;
     mapping(bytes32 => mapping(uint => Order[])) public orderBook; //Map orders by ticker and side == get orderbook per side & token
-    mapping(address => Order[]) traderOrders; //Map orders by trader == get open order per address
+    mapping(address => Order[]) traderOrders; //Map orders by trader == get open orders per address
     
 
 /* *** Events ***
 ==================*/
 
     event limitOrderCreated(Side side, bytes32 _ticker, uint _amount, uint _price);
+    event limitOrderFilled(address _trader, Side side, bytes32 _ticker, uint _amount, uint _price);
     event marketOrderFilled(Side side, bytes32 _ticker, uint _amount);
     event filledOrderRemoved(uint _Id, Side side, bytes32 _ticker);
     event swapDone(Side side, bytes32 _ticker, address _to, uint _amount, uint price);
@@ -58,6 +57,7 @@ contract Dex is Wallet {
             return 0;
         }
     }
+
 
     function getOpenOrders(address _trader) view public returns(Order[] memory) {
         return traderOrders[_trader];
@@ -151,6 +151,7 @@ contract Dex is Wallet {
                 swapToken(side, _ticker, orders[i].trader, leftToFill, orders[i].price);
                 orders[i].filled = orders[i].amount;
                 removeFilledOrder(orders[i].orderId, side, _ticker);
+                emit limitOrderFilled(orders[i].trader, side, _ticker, orders[i].amount, orders[i].price);
                 break;
             }
             //Market order < Limit order
@@ -166,6 +167,7 @@ contract Dex is Wallet {
                 swapToken(side, _ticker, orders[i].trader, orders[i].amount, orders[i].price);
                 orders[i].filled = orders[i].amount;
                 removeFilledOrder(orders[i].orderId, side, _ticker);
+                emit limitOrderFilled(orders[i].trader, side, _ticker, orders[i].amount, orders[i].price);
             }
         }
         
